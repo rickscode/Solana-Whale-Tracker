@@ -36,3 +36,6 @@ supabase/schedule.local.sql
 
 # Backup of a pre-existing webhook config
 .old-helius-webhook.json
+
+# Supabase CLI scratch state
+supabase/.temp/
