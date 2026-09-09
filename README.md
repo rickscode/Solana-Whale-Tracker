@@ -73,6 +73,30 @@ On a wallet's first cycle the tracker records its back history **without**
 alerting, so you don't get a wall of messages on startup. Alerts begin from the
 next cycle.
 
+## Hosting on Render (free)
+
+Render's free tier hosts web services rather than background workers, so the
+tracker binds a port and serves `/health` alongside its polling loop.
+
+1. Push this repo to GitHub, then in Render: **New > Web Service**, connect the
+   repo. `render.yaml` supplies the build and start commands.
+2. Add the five secrets from your `.env` (`HELIUS_API_KEY`, `SUPABASE_URL`,
+   `SUPABASE_SERVICE_ROLE_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) in the
+   Render dashboard. Never commit them.
+3. **Add a keep-alive ping.** Free instances sleep after ~15 minutes without
+   inbound traffic. Point a free uptime service (UptimeRobot, cron-job.org) at
+   `https://<your-service>.onrender.com/health` every 10 minutes.
+
+Two things to know about the free tier:
+
+- 750 instance-hours a month is just enough for one service running
+  continuously. A second free service would exceed it.
+- Without the ping it sleeps, and a sleeping tracker misses trades in real time.
+  It does not lose them permanently - on waking it resumes from the newest
+  stored trade and alerts on everything since - but the alerts arrive late.
+
+An always-free VM avoids the ping entirely and is the better long-term home.
+
 ## Adding wallets
 
 Insert a row - no code change, no restart. The wallet list is re-read every cycle.

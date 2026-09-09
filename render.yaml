@@ -1,0 +1,33 @@
+# Render Blueprint. Free tier hosts web services rather than background workers,
+# so the tracker binds a port and serves /health alongside its polling loop.
+#
+# Free instances sleep after ~15 minutes without inbound traffic, so an external
+# uptime pinger must hit /health every ~10 minutes to keep it awake. 750
+# instance-hours a month is just enough for one service running continuously.
+services:
+  - type: web
+    name: whale-tracker
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: POLL_INTERVAL_MS
+        value: "10000"
+      - key: MIN_BUY_ALERT_USD
+        value: "300"
+      - key: MIN_SELL_ALERT_USD
+        value: "300"
+      - key: LOG_LEVEL
+        value: info
