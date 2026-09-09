@@ -6,7 +6,10 @@ import {
     ROBINHOOD_QUOTES,
     ROBINHOOD_RPC_URL,
     ROBINHOOD_STABLES,
-    ROBINHOOD_WETH
+    ROBINHOOD_WETH,
+    RPC_BACKOFF_MS,
+    RPC_MAX_RETRIES,
+    RPC_PACE_MS
 } from '../config/constants';
 import { DetectedSwap, SwapEvent } from '../types';
 import { logger } from '../utils/logger';
@@ -22,16 +25,33 @@ interface RpcLog {
 const decimalsCache = new Map<string, number>();
 const blockTimeCache = new Map<number, number>();
 
-async function rpc<T>(method: string, params: unknown[]): Promise<T> {
-    const { data } = await axios.post(
-        ROBINHOOD_RPC_URL,
-        { jsonrpc: '2.0', id: 1, method, params },
-        { timeout: 45_000, headers: { 'Content-Type': 'application/json' } }
-    );
-    if (data.error) {
-        throw new Error(`${method}: ${JSON.stringify(data.error)}`);
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * The public RPC is shared and rate limits under load, which is normal rather
+ * than exceptional here: one seeding pass makes a receipt call per swap. Back
+ * off and retry instead of dropping the trade.
+ */
+async function rpc<T>(method: string, params: unknown[], attempt = 0): Promise<T> {
+    try {
+        const { data } = await axios.post(
+            ROBINHOOD_RPC_URL,
+            { jsonrpc: '2.0', id: 1, method, params },
+            { timeout: 45_000, headers: { 'Content-Type': 'application/json' } }
+        );
+        if (data.error) {
+            throw new Error(`${method}: ${JSON.stringify(data.error)}`);
+        }
+        return data.result as T;
+    } catch (error) {
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        const retryable = status === 429 || (status !== undefined && status >= 500);
+        if (retryable && attempt < RPC_MAX_RETRIES) {
+            await sleep(RPC_BACKOFF_MS * 2 ** attempt);
+            return rpc<T>(method, params, attempt + 1);
+        }
+        throw error;
     }
-    return data.result as T;
 }
 
 const topicAddress = (address: string): string => `0x${address.slice(2).toLowerCase().padStart(64, '0')}`;
@@ -136,6 +156,7 @@ export async function getRobinhoodSwaps(address: string, sinceUnix: number): Pro
         const side: SwapEvent['side'] = tokenDelta > 0n ? 'buy' : 'sell';
 
         const { native: quoteNative, usd: quoteUsd } = await priceFromPoolLeg(txHash, tokenAddress);
+        await sleep(RPC_PACE_MS);
 
         const decimals = await getDecimals(tokenAddress);
         const blockTime = await getBlockTime(entry.block);

@@ -1,4 +1,4 @@
-import { HeliusTokenTransfer, HeliusTransaction, Side, SwapEvent } from '../types';
+import { HeliusTransaction, Side, SwapEvent } from '../types';
 import { QUOTE_MINTS, STABLE_MINTS, WRAPPED_SOL } from '../config/constants';
 
 /**
@@ -13,29 +13,35 @@ export function parseSolanaSwap(tx: HeliusTransaction, wallet: string): SwapEven
         return null;
     }
 
-    // The traded token is the non-quote leg the wallet received (buy) or sent (sell).
-    let traded: HeliusTokenTransfer | null = null;
-    let side: Side | null = null;
-
+    // Net every non-quote leg per mint. A routed swap can deliver the same
+    // token in several tranches, and can bounce an intermediate token in and
+    // out; taking the first leg reports a fraction of the fill, and counting
+    // an intermediate hop invents a trade that never happened.
+    const deltas = new Map<string, number>();
     for (const transfer of tx.tokenTransfers ?? []) {
         if (QUOTE_MINTS.has(transfer.mint)) {
             continue;
         }
-        if (transfer.toUserAccount === wallet) {
-            traded = transfer;
-            side = 'buy';
-            break;
+        const inbound = transfer.toUserAccount === wallet;
+        const outbound = transfer.fromUserAccount === wallet;
+        if (inbound === outbound) {
+            continue;
         }
-        if (transfer.fromUserAccount === wallet) {
-            traded = transfer;
-            side = 'sell';
-            break;
-        }
+        const signed = inbound ? transfer.tokenAmount : -transfer.tokenAmount;
+        deltas.set(transfer.mint, (deltas.get(transfer.mint) ?? 0) + signed);
     }
 
-    if (!traded || !side || !traded.tokenAmount) {
+    // The trade is the token that actually moved most; anything that nets to
+    // zero was only passing through.
+    const moved = [...deltas.entries()].filter(([, amount]) => amount !== 0);
+    moved.sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+    const traded = moved[0];
+    if (!traded) {
         return null;
     }
+
+    const [tokenMint, tokenDelta] = traded;
+    const side: Side = tokenDelta > 0 ? 'buy' : 'sell';
 
     const quote = netQuoteLegs(tx, wallet, side);
 
@@ -44,8 +50,8 @@ export function parseSolanaSwap(tx: HeliusTransaction, wallet: string): SwapEven
         txHash: tx.signature,
         blockTime: tx.timestamp,
         side,
-        tokenAddress: traded.mint,
-        tokenAmount: traded.tokenAmount,
+        tokenAddress: tokenMint,
+        tokenAmount: Math.abs(tokenDelta),
         quoteNative: quote.sol,
         nativeSymbol: 'SOL',
         quoteUsd: quote.usd,

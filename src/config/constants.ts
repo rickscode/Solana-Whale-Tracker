@@ -65,3 +65,7 @@ export const ROBINHOOD_STABLES = new Set([ROBINHOOD_USDG]);
 /** ~0.101s blocks, so a generous margin still costs little. */
 export const ROBINHOOD_BLOCK_SECONDS = 0.101;
 export const ROBINHOOD_MAX_BLOCK_SPAN = parseInt(process.env.ROBINHOOD_MAX_BLOCK_SPAN || '250000', 10);
+/** The public Robinhood RPC is shared, so retry its rate limits rather than losing trades. */
+export const RPC_MAX_RETRIES = parseInt(process.env.RPC_MAX_RETRIES || '4', 10);
+export const RPC_BACKOFF_MS = parseInt(process.env.RPC_BACKOFF_MS || '600', 10);
+export const RPC_PACE_MS = parseInt(process.env.RPC_PACE_MS || '150', 10);
