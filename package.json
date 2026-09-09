@@ -10,7 +10,8 @@
     "type-check": "tsc --noEmit",
     "test": "tsx test/parser.test.ts",
     "sync:functions": "node scripts/sync-functions.mjs",
-    "webhook:sync": "node scripts/sync-webhook.mjs"
+    "webhook:sync": "node scripts/sync-webhook.mjs",
+    "flows": "node scripts/flows.mjs"
   },
   "keywords": [
     "solana",
