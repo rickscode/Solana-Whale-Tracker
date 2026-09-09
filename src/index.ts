@@ -100,8 +100,6 @@ async function detectSwaps(wallet: Wallet, since: number): Promise<DetectedSwap[
 }
 
 async function processWallet(wallet: Wallet): Promise<void> {
-    const isSeeding = !seeded.has(wallet.address);
-
     // Resume from the newest trade already recorded, with a minute of overlap
     // so a swap sharing a timestamp with it can't slip through. Duplicates are
     // free - the unique constraint absorbs them.
@@ -109,6 +107,14 @@ async function processWallet(wallet: Wallet): Promise<void> {
     const since = latest !== null
         ? latest - 60
         : Math.floor(Date.now() / 1000) - SEED_LOOKBACK_HOURS * 3600;
+
+    // Silence is only for a wallet's very first pass, when its back history
+    // would arrive as a wall of alerts. Once anything is stored we know exactly
+    // where we left off, so everything after that point is genuinely new and
+    // must be alerted - including trades made while this process was not
+    // running. Keying that off in-memory state instead meant every restart
+    // swallowed the alerts for whatever happened while the machine was asleep.
+    const neverSeeded = !seeded.has(wallet.address) && latest === null;
 
     const detected = await detectSwaps(wallet, since);
 
@@ -127,7 +133,7 @@ async function processWallet(wallet: Wallet): Promise<void> {
                 `${row.side.toUpperCase()} ${row.token_symbol ?? row.token_address} by ${wallet.label} (${value})`
             );
 
-            if (isSeeding) {
+            if (neverSeeded) {
                 continue;
             }
             // A trade with no derivable value is an airdrop or a bridge-in, not
@@ -143,8 +149,8 @@ async function processWallet(wallet: Wallet): Promise<void> {
         }
     }
 
-    if (isSeeding) {
-        seeded.add(wallet.address);
+    seeded.add(wallet.address);
+    if (neverSeeded) {
         logger.info(
             `Seeded ${wallet.label} from the last ${SEED_LOOKBACK_HOURS}h - alerts start from the next cycle`
         );
