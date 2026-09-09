@@ -2,21 +2,23 @@ import { HeliusTransaction, Side, SwapEvent } from '../types';
 import { DUST_TOKEN_AMOUNT, QUOTE_MINTS, STABLE_MINTS, WRAPPED_SOL } from '../config/constants';
 
 /**
- * Turn a Helius SWAP into a chain-agnostic SwapEvent, or null if it is not a
- * swap this wallet took part in.
+ * Every trade this wallet made in one transaction.
+ *
+ * A transaction can hold more than one: a token-for-token swap gives up one
+ * asset and takes another, and both sides matter. It can also hold none - a
+ * mass airdrop reaches hundreds of wallets in a single transaction, and being
+ * one of the recipients is not a trade.
  *
  * Solana addresses are base58 and case-sensitive, so these compare with ===.
  * Lowercasing them (an EVM habit) can collapse two distinct addresses into one.
  */
-export function parseSolanaSwap(tx: HeliusTransaction, wallet: string): SwapEvent | null {
+export function parseSolanaSwaps(tx: HeliusTransaction, wallet: string): SwapEvent[] {
     if (tx.type !== 'SWAP' || tx.transactionError) {
-        return null;
+        return [];
     }
 
-    // Net every non-quote leg per mint. A routed swap can deliver the same
-    // token in several tranches, and can bounce an intermediate token in and
-    // out; taking the first leg reports a fraction of the fill, and counting
-    // an intermediate hop invents a trade that never happened.
+    // Net each non-quote token. A routed swap can deliver one token in several
+    // tranches, and can bounce an intermediate token in and straight back out.
     const deltas = new Map<string, number>();
     for (const transfer of tx.tokenTransfers ?? []) {
         if (QUOTE_MINTS.has(transfer.mint)) {
@@ -31,88 +33,84 @@ export function parseSolanaSwap(tx: HeliusTransaction, wallet: string): SwapEven
         deltas.set(transfer.mint, (deltas.get(transfer.mint) ?? 0) + signed);
     }
 
-    // The trade is the token that actually moved most; anything that nets to
-    // zero was only passing through.
-    const moved = [...deltas.entries()].filter(([, amount]) => amount !== 0);
-    moved.sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
-    const traded = moved[0];
-    if (!traded) {
-        return null;
+    const moved = [...deltas.entries()].filter(([, amount]) => Math.abs(amount) >= DUST_TOKEN_AMOUNT);
+    if (moved.length === 0) {
+        return [];
     }
 
-    const [tokenMint, tokenDelta] = traded;
-    if (Math.abs(tokenDelta) < DUST_TOKEN_AMOUNT) {
-        return null; // a rounding residue, not a trade
+    const flow = netQuoteFlow(tx, wallet);
+    const paidSomething = flow.usd !== 0 || flow.native !== 0;
+    const gaveUpToken = moved.some(([, amount]) => amount < 0);
+
+    // Tokens arrived, nothing left the wallet: an airdrop or a transfer in.
+    if (!paidSomething && !gaveUpToken) {
+        return [];
     }
-    const side: Side = tokenDelta > 0 ? 'buy' : 'sell';
 
-    const quote = netQuoteLegs(tx, wallet, side);
+    // With a single traded token the quote flow is unambiguously its price.
+    // With several - a token-for-token swap - there is no honest way to split
+    // one quote figure between them, so they are valued at market instead.
+    const attributable = moved.length === 1 && paidSomething;
 
-    return {
-        chain: 'solana',
-        txHash: tx.signature,
-        blockTime: tx.timestamp,
-        side,
-        tokenAddress: tokenMint,
-        tokenAmount: Math.abs(tokenDelta),
-        quoteNative: quote.sol,
-        nativeSymbol: 'SOL',
-        quoteUsd: quote.usd,
-        dex: tx.source || null
-    };
+    return moved.map(([tokenMint, tokenDelta]) => {
+        const side: Side = tokenDelta > 0 ? 'buy' : 'sell';
+        const sign = side === 'buy' ? -1 : 1; // buying spends the quote, selling receives it
+        return {
+            chain: 'solana' as const,
+            txHash: tx.signature,
+            blockTime: tx.timestamp,
+            side,
+            tokenAddress: tokenMint,
+            tokenAmount: Math.abs(tokenDelta),
+            quoteNative: attributable ? sign * flow.native : 0,
+            quoteUsd: attributable ? sign * flow.usd : 0,
+            nativeSymbol: 'SOL',
+            dex: tx.source || null
+        };
+    });
 }
 
 /**
- * What the wallet actually paid (buy) or received (sell).
+ * Net quote movement for the wallet, positive when received.
  *
- * A routed swap splits the payment across several legs and often bounces
- * through the wallet's own wrapped-SOL account, so every leg has to be summed
- * and the opposite direction subtracted. Taking a single leg reports a
- * fraction of the trade; ignoring the return legs reports a multiple of it.
- *
- * Legs that never touch the wallet belong to the router, not the trader, and
- * are excluded entirely.
+ * Only legs touching the wallet count: a routed swap moves quote assets between
+ * pools, and those belong to the router rather than the trader. Legs are summed
+ * rather than taken one at a time, because a payment is often split across
+ * several, and netted, because a swap frequently bounces through the wallet's
+ * own wrapped-SOL account and back.
  */
-function netQuoteLegs(
-    tx: HeliusTransaction,
-    wallet: string,
-    side: Side
-): { sol: number; usd: number } {
-    // On a buy the quote leaves the wallet; on a sell it arrives.
-    const sign = (from: string, to: string): number => {
-        const out = from === wallet;
-        const inbound = to === wallet;
-        if (out === inbound) {
-            return 0; // untouched by this wallet, or a self-transfer
-        }
-        const spending = side === 'buy';
-        return out === spending ? 1 : -1;
-    };
-
+function netQuoteFlow(tx: HeliusTransaction, wallet: string): { usd: number; native: number } {
     let usd = 0;
-    let sol = 0;
+    let native = 0;
     let sawWrappedSol = false;
 
-    for (const t of tx.tokenTransfers ?? []) {
-        const direction = sign(t.fromUserAccount, t.toUserAccount);
-        if (direction === 0) {
+    for (const transfer of tx.tokenTransfers ?? []) {
+        const inbound = transfer.toUserAccount === wallet;
+        const outbound = transfer.fromUserAccount === wallet;
+        if (inbound === outbound) {
             continue;
         }
-        if (STABLE_MINTS.has(t.mint)) {
-            usd += direction * t.tokenAmount;
-        } else if (t.mint === WRAPPED_SOL) {
+        const signed = inbound ? transfer.tokenAmount : -transfer.tokenAmount;
+        if (STABLE_MINTS.has(transfer.mint)) {
+            usd += signed;
+        } else if (transfer.mint === WRAPPED_SOL) {
             sawWrappedSol = true;
-            sol += direction * t.tokenAmount;
+            native += signed;
         }
     }
 
     // Native lamports only count when nothing was wrapped, otherwise a
-    // wrap-then-swap gets charged twice for the same SOL.
+    // wrap-then-swap is charged twice for the same SOL.
     if (!sawWrappedSol) {
-        for (const n of tx.nativeTransfers ?? []) {
-            sol += sign(n.fromUserAccount, n.toUserAccount) * (n.amount / 1e9);
+        for (const transfer of tx.nativeTransfers ?? []) {
+            const inbound = transfer.toUserAccount === wallet;
+            const outbound = transfer.fromUserAccount === wallet;
+            if (inbound === outbound) {
+                continue;
+            }
+            native += (inbound ? transfer.amount : -transfer.amount) / 1e9;
         }
     }
 
-    return { sol, usd };
+    return { usd, native };
 }

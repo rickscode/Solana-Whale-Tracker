@@ -1,4 +1,5 @@
 import { getSupabase } from './supabase';
+import { INSERT_BACKOFF_MS, INSERT_MAX_RETRIES } from '../config/constants';
 import { TradeRow, Wallet } from '../types';
 
 export async function getActiveWallets(): Promise<Wallet[]> {
@@ -22,7 +23,7 @@ export async function getActiveWallets(): Promise<Wallet[]> {
  * re-reading the same transactions every poll is harmless and there is no
  * separate bookkeeping to drift out of sync.
  */
-export async function insertTrade(row: TradeRow): Promise<boolean> {
+export async function insertTrade(row: TradeRow, attempt = 0): Promise<boolean> {
     const { data, error } = await getSupabase()
         .from('whale_trades')
         .upsert(row, {
@@ -32,6 +33,16 @@ export async function insertTrade(row: TradeRow): Promise<boolean> {
         .select('id');
 
     if (error) {
+        // A trade dropped here is gone for good: the next cycle resumes from the
+        // newest stored trade, so an older one that failed is never revisited.
+        // Transient gateway errors are therefore worth retrying rather than losing.
+        const transient = /timeout|gateway|fetch failed|network|ECONN|502|503|504/i.test(
+            `${error.message} ${error.code ?? ''}`
+        );
+        if (transient && attempt < INSERT_MAX_RETRIES) {
+            await new Promise(resolve => setTimeout(resolve, INSERT_BACKOFF_MS * 2 ** attempt));
+            return insertTrade(row, attempt + 1);
+        }
         throw new Error(`Failed to insert trade ${row.tx_hash}: ${error.message}`);
     }
     return (data?.length ?? 0) > 0;

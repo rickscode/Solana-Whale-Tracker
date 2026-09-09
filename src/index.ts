@@ -11,7 +11,7 @@ import { getActiveWallets, getLatestTradeTime, insertTrade } from './database/qu
 import * as helius from './services/helius';
 import * as telegram from './services/telegram';
 import { getNativePriceUsd, getTokenInfo } from './services/dexscreener';
-import { parseSolanaSwap } from './services/parser';
+import { parseSolanaSwaps } from './services/parser';
 import { getRobinhoodSwaps } from './services/robinhood';
 import { logger } from './utils/logger';
 
@@ -46,6 +46,11 @@ async function buildRow(swap: SwapEvent, wallet: Wallet, raw: unknown): Promise<
     // publish a sell that appears to have lost money on the proceeds.
     if (priced && (hasUsd || hasNative) && total > 0) {
         usdValue = total;
+    } else if (!hasUsd && !hasNative && info.priceUsd !== null) {
+        // A token-for-token swap has no quote leg to price against, so value it
+        // at market. Approximate rather than the exact fill, but the two sides
+        // of the swap should agree, which a null value never would.
+        usdValue = info.priceUsd * swap.tokenAmount;
     }
 
     const quoteSymbol = hasUsd && hasNative ? 'MIXED' : hasNative ? swap.nativeSymbol : 'USD';
@@ -87,8 +92,7 @@ async function detectSwaps(wallet: Wallet, since: number): Promise<DetectedSwap[
     const txs = await helius.getRecentSwaps(wallet.address, since);
     const out: DetectedSwap[] = [];
     for (const tx of txs) {
-        const swap = parseSolanaSwap(tx, wallet.address);
-        if (swap) {
+        for (const swap of parseSolanaSwaps(tx, wallet.address)) {
             out.push({ swap, raw: tx });
         }
     }

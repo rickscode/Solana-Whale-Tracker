@@ -127,11 +127,16 @@ order by net_usd desc;
   cached for 60 seconds.
 - **Native SOL amounts may include a small amount of fees and rent** (well under
   1% on a meaningful trade), since those share the transaction's native transfers.
-- **Some Robinhood trades have no derivable price.** pump.fun routes them through
-  a relayer that pays on the trader's behalf, so when there is no pool leg in the
-  transaction there is nothing to price against. These are recorded with a null
-  value and never alerted - they are mostly airdrops and bridge-ins rather than
-  trades.
+- **Airdrops are not recorded as trades.** A mass distribution reaches hundreds
+  of wallets in one transaction, and being a recipient is not a buy. On Solana a
+  trade must give something up; on Robinhood, where a relayer pays on the
+  trader's behalf, a trade is one that has a derivable price.
+- **A few trades have no derivable value.** Some sells show tokens leaving with
+  no proceeds arriving anywhere the transaction reveals. These are recorded with
+  a null value and never alerted, rather than guessed at.
+- **Token-for-token swaps are recorded as two trades** - a sell of one and a buy
+  of the other - and valued at market, since there is no quote leg to price
+  either side against.
 - **A brand new token may have no DexScreener pair yet.** The trade is still
   recorded; name, price and liquidity come through as null and the lookup retries
   on the next poll.

@@ -148,53 +148,68 @@ export async function getRobinhoodSwaps(address: string, sinceUnix: number): Pro
 
     for (const [txHash, entry] of byTx) {
         const moved = [...entry.deltas.entries()].filter(([, v]) => v !== 0n);
-        const candidates = moved.filter(([token]) => !ROBINHOOD_QUOTES.has(token));
+        const candidates: Array<{ token: string; delta: bigint; amount: number }> = [];
+        let quoteMoved = false;
+
+        for (const [token, delta] of moved) {
+            if (ROBINHOOD_QUOTES.has(token)) {
+                quoteMoved = true;
+                continue;
+            }
+            // Raw integers of tokens with different decimals are not comparable,
+            // so scale before doing anything with them.
+            const amount = Math.abs(Number(delta) / 10 ** (await getDecimals(token)));
+            if (amount >= DUST_TOKEN_AMOUNT) {
+                candidates.push({ token, delta, amount });
+            }
+        }
+
         if (candidates.length === 0) {
             continue; // pure quote movement - a transfer or bridge, not a trade
         }
-
-        // Raw integers of tokens with different decimals are not comparable, so
-        // scale first; otherwise a 6-decimal token always loses to an 18-decimal one.
-        let tokenAddress = '';
-        let tokenDelta = 0n;
-        let tokenAmount = 0;
-        for (const [token, delta] of candidates) {
-            const scaled = Math.abs(Number(delta) / 10 ** (await getDecimals(token)));
-            if (scaled > tokenAmount) {
-                tokenAmount = scaled;
-                tokenAddress = token;
-                tokenDelta = delta;
-            }
-        }
-        if (tokenAmount < DUST_TOKEN_AMOUNT) {
-            continue; // a rounding residue, not a trade
-        }
-
-        const side: SwapEvent['side'] = tokenDelta > 0n ? 'buy' : 'sell';
-
-        const { native: quoteNative, usd: quoteUsd } = await priceFromPoolLeg(txHash, tokenAddress);
-        await sleep(RPC_PACE_MS);
 
         const blockTime = await getBlockTime(entry.block);
         if (blockTime <= sinceUnix) {
             continue;
         }
 
-        swaps.push({
-            swap: {
-                chain: 'robinhood',
-                txHash,
-                blockTime,
-                side,
-                tokenAddress,
-                tokenAmount,
-                quoteNative,
-                quoteUsd,
-                nativeSymbol: 'ETH',
-                dex: 'uniswap'
-            },
-            raw: { txHash, block: entry.block, logs: entry.logs.length }
-        });
+        // Only a single traded token can claim the transaction's quote leg; a
+        // token-for-token swap has no honest way to split one figure in two.
+        const paid = candidates.length === 1
+            ? await priceFromPoolLeg(txHash, candidates[0].token)
+            : { native: 0, usd: 0 };
+
+        // The relayer pays, so a genuine buy also shows nothing leaving the
+        // wallet - "did they pay" cannot separate a trade from an airdrop here.
+        // Having a price can: a trade has one, a mass distribution does not.
+        // Those arrive with hundreds of recipients in a single transaction, and
+        // counting them as buys invents trades that never happened.
+        const gaveUpToken = candidates.some(c => c.delta < 0n);
+        const hasPrice = paid.native > 0 || paid.usd > 0;
+        if (!hasPrice && !gaveUpToken && !quoteMoved) {
+            continue;
+        }
+
+        for (const { token, delta, amount } of candidates) {
+            const side: SwapEvent['side'] = delta > 0n ? 'buy' : 'sell';
+
+            swaps.push({
+                swap: {
+                    chain: 'robinhood',
+                    txHash,
+                    blockTime,
+                    side,
+                    tokenAddress: token,
+                    tokenAmount: amount,
+                    quoteNative: candidates.length === 1 ? paid.native : 0,
+                    quoteUsd: candidates.length === 1 ? paid.usd : 0,
+                    nativeSymbol: 'ETH',
+                    dex: 'uniswap'
+                },
+                raw: { txHash, block: entry.block, logs: entry.logs.length }
+            });
+        }
+        await sleep(RPC_PACE_MS);
     }
 
     swaps.sort((a, b) => b.swap.blockTime - a.swap.blockTime);
@@ -202,13 +217,22 @@ export async function getRobinhoodSwaps(address: string, sinceUnix: number): Pro
 }
 
 /**
- * What the trade actually cost, taken from the pool rather than the account.
+ * What the trade actually cost, taken from the transaction rather than the account.
  *
  * pump.fun routes these through a relayer that pays on the trader's behalf, so
  * the quote leg never touches the trader's address - from their account alone a
- * buy is indistinguishable from a gift. The pool that sent or received the
- * traded token is the counterparty that was actually paid, so its quote-token
- * leg in the same transaction is the real price.
+ * buy is indistinguishable from an airdrop.
+ *
+ * The quote passes through several router hops carrying the same amount at each
+ * one, so the largest leg is the trade and the repeats are that same money in
+ * flight. Summing them would multiply the price by the number of hops. Legs are
+ * restricted to addresses that handled the traded token, so an unrelated
+ * transfer riding along in the same transaction cannot inflate it.
+ *
+ * Identifying the pool exactly was tried and is less robust: route shapes vary
+ * enough that the pool is sometimes unidentifiable, or pays in a token the
+ * trader never sees. This heuristic matches every trade checked against
+ * pump.fun's own figures.
  */
 async function priceFromPoolLeg(
     txHash: string,
@@ -226,7 +250,6 @@ async function priceFromPoolLeg(
         l => l.topics?.[0]?.toLowerCase() === ERC20_TRANSFER_TOPIC && l.topics.length >= 3
     );
 
-    // Everyone that handled the traded token: the pool is among them.
     const handlers = new Set<string>();
     for (const log of transfers) {
         if (log.address.toLowerCase() !== tradedToken) {
@@ -243,10 +266,8 @@ async function priceFromPoolLeg(
         if (!ROBINHOOD_QUOTES.has(token)) {
             continue;
         }
-        const from = fromTopic(log.topics[1]);
-        const to = fromTopic(log.topics[2]);
-        if (!handlers.has(from) && !handlers.has(to)) {
-            continue; // a quote leg belonging to some unrelated hop
+        if (!handlers.has(fromTopic(log.topics[1])) && !handlers.has(fromTopic(log.topics[2]))) {
+            continue;
         }
         const decimals = await getDecimals(token);
         const amount = Number(BigInt(log.data === '0x' ? '0x0' : log.data)) / 10 ** decimals;

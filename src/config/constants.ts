@@ -71,3 +71,6 @@ export const RPC_BACKOFF_MS = parseInt(process.env.RPC_BACKOFF_MS || '600', 10);
 export const RPC_PACE_MS = parseInt(process.env.RPC_PACE_MS || '150', 10);
 /** Below this, a leg is a rounding residue rather than a trade. */
 export const DUST_TOKEN_AMOUNT = 1e-9;
+/** A dropped insert is never revisited, so transient database errors are retried. */
+export const INSERT_MAX_RETRIES = parseInt(process.env.INSERT_MAX_RETRIES || '4', 10);
+export const INSERT_BACKOFF_MS = parseInt(process.env.INSERT_BACKOFF_MS || '500', 10);
