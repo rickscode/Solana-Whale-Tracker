@@ -1,12 +1,12 @@
 import {
     MIN_ALERT_USD,
     POLL_INTERVAL_MS,
-    TX_FETCH_LIMIT,
+    SEED_LOOKBACK_HOURS,
     validateEnvVariables
 } from './config/constants';
 import { SwapEvent, TradeRow, Wallet } from './types';
 import { testConnection as testSupabase } from './database/supabase';
-import { getActiveWallets, insertTrade } from './database/queries';
+import { getActiveWallets, getLatestTradeTime, insertTrade } from './database/queries';
 import * as helius from './services/helius';
 import * as telegram from './services/telegram';
 import { getSolPriceUsd, getTokenInfo } from './services/dexscreener';
@@ -75,8 +75,17 @@ async function buildRow(swap: SwapEvent, wallet: Wallet, raw: unknown): Promise<
 }
 
 async function processWallet(wallet: Wallet): Promise<void> {
-    const transactions = await helius.getWalletTransactions(wallet.address, TX_FETCH_LIMIT);
     const isSeeding = !seeded.has(wallet.address);
+
+    // Resume from the newest trade already recorded, with a minute of overlap
+    // so a swap sharing a timestamp with it can't slip through. Duplicates are
+    // free - the unique constraint absorbs them.
+    const latest = await getLatestTradeTime(wallet.chain, wallet.address);
+    const since = latest !== null
+        ? latest - 60
+        : Math.floor(Date.now() / 1000) - SEED_LOOKBACK_HOURS * 3600;
+
+    const transactions = await helius.getRecentSwaps(wallet.address, since);
 
     // Oldest first, so the trade log reads chronologically.
     for (const tx of [...transactions].reverse()) {
@@ -113,7 +122,9 @@ async function processWallet(wallet: Wallet): Promise<void> {
 
     if (isSeeding) {
         seeded.add(wallet.address);
-        logger.info(`Seeded history for ${wallet.label} - alerts start from the next cycle`);
+        logger.info(
+            `Seeded ${wallet.label} from the last ${SEED_LOOKBACK_HOURS}h - alerts start from the next cycle`
+        );
     }
 }
 

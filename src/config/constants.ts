@@ -5,7 +5,11 @@ dotenv.config();
 // Monitoring
 export const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '10000', 10);
 export const MIN_ALERT_USD = parseFloat(process.env.MIN_ALERT_USD || '0');
-export const TX_FETCH_LIMIT = 50;
+export const PAGE_SIZE = 100;
+/** How far back a single cycle will page before giving up. */
+export const MAX_PAGES = parseInt(process.env.MAX_PAGES || '5', 10);
+/** History pulled in on a wallet's first cycle. */
+export const SEED_LOOKBACK_HOURS = parseInt(process.env.SEED_LOOKBACK_HOURS || '24', 10);
 
 // Solana mints
 export const WRAPPED_SOL = 'So11111111111111111111111111111111111111112';

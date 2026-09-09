@@ -126,9 +126,12 @@ order by net_usd desc;
 - **A brand new token may have no DexScreener pair yet.** The trade is still
   recorded; name, price and liquidity come through as null and the lookup retries
   on the next poll.
-- **Only 50 transactions are fetched per wallet per poll.** A wallet doing more
-  than that in one interval would have the overflow missed. Not a concern at
-  current volumes.
+- **Transactions are paged, not windowed.** Each cycle pages back until it
+  reaches trades already recorded, so a wallet that transfers or burns heavily
+  can't bury its swaps behind hundreds of unrelated transactions. `MAX_PAGES`
+  (default 5, i.e. 500 transactions) caps how far one cycle will go; it logs a
+  warning if it hits the cap. A wallet's first cycle pulls
+  `SEED_LOOKBACK_HOURS` of history (default 24).
 - **`whale_trades` grows without bound.** Not an issue for a long time; prune old
   rows if it ever is.
 

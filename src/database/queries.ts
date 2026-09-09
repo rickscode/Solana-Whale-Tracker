@@ -36,3 +36,20 @@ export async function insertTrade(row: TradeRow): Promise<boolean> {
     }
     return (data?.length ?? 0) > 0;
 }
+
+/** Unix seconds of the newest trade recorded for a wallet, or null if none. */
+export async function getLatestTradeTime(chain: string, walletAddress: string): Promise<number | null> {
+    const { data, error } = await getSupabase()
+        .from('whale_trades')
+        .select('block_time')
+        .eq('chain', chain)
+        .eq('wallet_address', walletAddress)
+        .order('block_time', { ascending: false })
+        .limit(1);
+
+    if (error) {
+        throw new Error(`Failed to read latest trade time: ${error.message}`);
+    }
+    const newest = data?.[0]?.block_time;
+    return newest ? Math.floor(new Date(newest).getTime() / 1000) : null;
+}
