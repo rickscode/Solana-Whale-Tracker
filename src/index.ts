@@ -1,16 +1,18 @@
 import {
-    MIN_ALERT_USD,
+    MIN_BUY_ALERT_USD,
+    MIN_SELL_ALERT_USD,
     POLL_INTERVAL_MS,
     SEED_LOOKBACK_HOURS,
     validateEnvVariables
 } from './config/constants';
-import { SwapEvent, TradeRow, Wallet } from './types';
+import { DetectedSwap, SwapEvent, TradeRow, Wallet } from './types';
 import { testConnection as testSupabase } from './database/supabase';
 import { getActiveWallets, getLatestTradeTime, insertTrade } from './database/queries';
 import * as helius from './services/helius';
 import * as telegram from './services/telegram';
-import { getSolPriceUsd, getTokenInfo } from './services/dexscreener';
+import { getNativePriceUsd, getTokenInfo } from './services/dexscreener';
 import { parseSolanaSwap } from './services/parser';
+import { getRobinhoodSwaps } from './services/robinhood';
 import { logger } from './utils/logger';
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
@@ -25,26 +27,26 @@ async function buildRow(swap: SwapEvent, wallet: Wallet, raw: unknown): Promise<
     // legs count. If a SOL leg can't be priced, the total is unknown rather
     // than the stablecoin half, which would understate the trade.
     const hasUsd = swap.quoteUsd !== 0;
-    const hasSol = swap.quoteSol !== 0;
+    const hasNative = swap.quoteNative !== 0;
 
     let usdValue: number | null = null;
     let total = swap.quoteUsd;
     let priced = true;
 
-    if (hasSol) {
-        const solPrice = await getSolPriceUsd();
-        if (solPrice === null) {
+    if (hasNative) {
+        const nativePrice = await getNativePriceUsd(swap.chain);
+        if (nativePrice === null) {
             priced = false;
         } else {
-            total += swap.quoteSol * solPrice;
+            total += swap.quoteNative * nativePrice;
         }
     }
-    if (priced && (hasUsd || hasSol)) {
+    if (priced && (hasUsd || hasNative)) {
         usdValue = total;
     }
 
-    const quoteSymbol = hasUsd && hasSol ? 'MIXED' : hasSol ? 'SOL' : 'USD';
-    const quoteAmount = quoteSymbol === 'SOL' ? swap.quoteSol : swap.quoteUsd;
+    const quoteSymbol = hasUsd && hasNative ? 'MIXED' : hasNative ? swap.nativeSymbol : 'USD';
+    const quoteAmount = hasNative && !hasUsd ? swap.quoteNative : swap.quoteUsd;
 
     // Their effective fill, derived from what actually moved - not the current
     // market price, which has already drifted by the time we see the trade.
@@ -74,6 +76,22 @@ async function buildRow(swap: SwapEvent, wallet: Wallet, raw: unknown): Promise<
     };
 }
 
+/** Route a wallet to its chain's adapter. Both emit the same SwapEvent shape. */
+async function detectSwaps(wallet: Wallet, since: number): Promise<DetectedSwap[]> {
+    if (wallet.chain === 'robinhood') {
+        return getRobinhoodSwaps(wallet.address, since);
+    }
+    const txs = await helius.getRecentSwaps(wallet.address, since);
+    const out: DetectedSwap[] = [];
+    for (const tx of txs) {
+        const swap = parseSolanaSwap(tx, wallet.address);
+        if (swap) {
+            out.push({ swap, raw: tx });
+        }
+    }
+    return out;
+}
+
 async function processWallet(wallet: Wallet): Promise<void> {
     const isSeeding = !seeded.has(wallet.address);
 
@@ -85,17 +103,12 @@ async function processWallet(wallet: Wallet): Promise<void> {
         ? latest - 60
         : Math.floor(Date.now() / 1000) - SEED_LOOKBACK_HOURS * 3600;
 
-    const transactions = await helius.getRecentSwaps(wallet.address, since);
+    const detected = await detectSwaps(wallet, since);
 
     // Oldest first, so the trade log reads chronologically.
-    for (const tx of [...transactions].reverse()) {
+    for (const { swap, raw } of [...detected].reverse()) {
         try {
-            const swap = parseSolanaSwap(tx, wallet.address);
-            if (!swap) {
-                continue;
-            }
-
-            const row = await buildRow(swap, wallet, tx);
+            const row = await buildRow(swap, wallet, raw);
 
             // Already have it - the unique constraint decides, not local state.
             if (!(await insertTrade(row))) {
@@ -110,13 +123,16 @@ async function processWallet(wallet: Wallet): Promise<void> {
             if (isSeeding) {
                 continue;
             }
-            if (row.usd_value !== null && row.usd_value < MIN_ALERT_USD) {
+            // A trade with no derivable value is an airdrop or a bridge-in, not
+            // something to act on, so it is stored but never alerted.
+            const threshold = row.side === 'buy' ? MIN_BUY_ALERT_USD : MIN_SELL_ALERT_USD;
+            if (row.usd_value === null || row.usd_value < threshold) {
                 continue;
             }
             await telegram.sendTradeAlert(row);
         } catch (error) {
             // One bad transaction must never stop the cycle or block later ones.
-            logger.error(`Failed on ${tx.signature}:`, error instanceof Error ? error.message : error);
+            logger.error(`Failed on ${swap.txHash}:`, error instanceof Error ? error.message : error);
         }
     }
 
@@ -174,7 +190,8 @@ async function main(): Promise<void> {
     }
     logger.info(`Loaded ${wallets.length} wallet(s): ${wallets.map(w => w.label).join(', ')}`);
 
-    if (!(await helius.testConnection(wallets[0].address))) {
+    const solanaWallet = wallets.find(w => w.chain === 'solana');
+    if (solanaWallet && !(await helius.testConnection(solanaWallet.address))) {
         throw new Error('Helius connection failed');
     }
     if (!(await telegram.testConnection())) {

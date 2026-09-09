@@ -4,7 +4,9 @@ dotenv.config();
 
 // Monitoring
 export const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '10000', 10);
-export const MIN_ALERT_USD = parseFloat(process.env.MIN_ALERT_USD || '0');
+/** Alert thresholds, per side. Everything is still recorded either way. */
+export const MIN_BUY_ALERT_USD = parseFloat(process.env.MIN_BUY_ALERT_USD || '300');
+export const MIN_SELL_ALERT_USD = parseFloat(process.env.MIN_SELL_ALERT_USD || '300');
 export const PAGE_SIZE = 100;
 /** How far back a single cycle will page before giving up. */
 export const MAX_PAGES = parseInt(process.env.MAX_PAGES || '5', 10);
@@ -49,3 +51,17 @@ export function validateEnvVariables(): void {
         throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
     }
 }
+
+// --- Robinhood Chain (EVM, chain id 4663, Arbitrum Orbit) ---
+export const ROBINHOOD_RPC_URL = process.env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com';
+/** keccak256("Transfer(address,address,uint256)") */
+export const ERC20_TRANSFER_TOPIC =
+    '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+export const ROBINHOOD_WETH = '0x0bd7d308f8e1639fab988df18a8011f41eacad73';
+export const ROBINHOOD_USDG = '0x5fc5360d0400a0fd4f2af552add042d716f1d168';
+/** Assets that fund a trade here rather than being the thing traded. */
+export const ROBINHOOD_QUOTES = new Set([ROBINHOOD_WETH, ROBINHOOD_USDG]);
+export const ROBINHOOD_STABLES = new Set([ROBINHOOD_USDG]);
+/** ~0.101s blocks, so a generous margin still costs little. */
+export const ROBINHOOD_BLOCK_SECONDS = 0.101;
+export const ROBINHOOD_MAX_BLOCK_SPAN = parseInt(process.env.ROBINHOOD_MAX_BLOCK_SPAN || '250000', 10);

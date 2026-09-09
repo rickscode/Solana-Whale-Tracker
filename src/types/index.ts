@@ -45,8 +45,10 @@ export interface SwapEvent {
     side: Side;
     tokenAddress: string;
     tokenAmount: number;
-    /** Net SOL paid (buy) or received (sell), after cancelling routing hops. */
-    quoteSol: number;
+    /** Net native asset paid (buy) or received (sell) - SOL on Solana, ETH on Robinhood. */
+    quoteNative: number;
+    /** Ticker of that native asset, for display. */
+    nativeSymbol: string;
     /** Net stablecoin paid or received, already in USD. */
     quoteUsd: number;
     dex: string | null;
@@ -82,5 +84,11 @@ export interface TradeRow {
     market_cap_usd: number | null;
     pair_url: string | null;
     block_time: string; // ISO
+    raw: unknown;
+}
+
+/** What a chain adapter returns: the normalised swap plus the raw source data. */
+export interface DetectedSwap {
+    swap: SwapEvent;
     raw: unknown;
 }

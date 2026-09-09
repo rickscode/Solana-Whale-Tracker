@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { WRAPPED_SOL } from '../config/constants';
+import { ROBINHOOD_WETH, WRAPPED_SOL } from '../config/constants';
 import { TokenInfo } from '../types';
 import { logger } from '../utils/logger';
 
@@ -79,7 +79,9 @@ export async function getTokenInfo(chain: string, address: string): Promise<Toke
     return info;
 }
 
-export async function getSolPriceUsd(): Promise<number | null> {
-    const info = await getTokenInfo('solana', WRAPPED_SOL);
+/** USD price of a chain's native asset, used to value trades paid in it. */
+export async function getNativePriceUsd(chain: string): Promise<number | null> {
+    const wrapped = chain === 'robinhood' ? ROBINHOOD_WETH : WRAPPED_SOL;
+    const info = await getTokenInfo(chain, wrapped);
     return info.priceUsd;
 }

@@ -46,7 +46,8 @@ export function parseSolanaSwap(tx: HeliusTransaction, wallet: string): SwapEven
         side,
         tokenAddress: traded.mint,
         tokenAmount: traded.tokenAmount,
-        quoteSol: quote.sol,
+        quoteNative: quote.sol,
+        nativeSymbol: 'SOL',
         quoteUsd: quote.usd,
         dex: tx.source || null
     };
