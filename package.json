@@ -8,7 +8,9 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "type-check": "tsc --noEmit",
-    "test": "tsx test/parser.test.ts"
+    "test": "tsx test/parser.test.ts",
+    "sync:functions": "node scripts/sync-functions.mjs",
+    "webhook:sync": "node scripts/sync-webhook.mjs"
   },
   "keywords": [
     "solana",

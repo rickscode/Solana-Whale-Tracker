@@ -14,7 +14,6 @@ import { getNativePriceUsd, getTokenInfo } from './services/dexscreener';
 import { parseSolanaSwaps } from './services/parser';
 import { getRobinhoodSwaps } from './services/robinhood';
 import { logger } from './utils/logger';
-import { recordCycle, startHealthServer } from './server';
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -182,9 +181,7 @@ async function monitoringLoop(): Promise<void> {
                 }
                 await sleep(1000);
             }
-            recordCycle(true);
         } catch (error) {
-            recordCycle(false);
             logger.error('Cycle failed:', error instanceof Error ? error.message : error);
         }
 
@@ -194,7 +191,6 @@ async function monitoringLoop(): Promise<void> {
 
 async function main(): Promise<void> {
     logger.info('Starting whale tracker...');
-    startHealthServer();
     validateEnvVariables();
 
     if (!(await testSupabase())) {

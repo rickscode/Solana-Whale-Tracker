@@ -36,9 +36,6 @@ export const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 
 export const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
-/** Free hosting deploys web services, not workers, so a port must be bound. */
-export const PORT = parseInt(process.env.PORT || '3000', 10);
-
 export function validateEnvVariables(): void {
     const required = [
         'HELIUS_API_KEY',
