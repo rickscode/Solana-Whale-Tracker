@@ -30,3 +30,9 @@ Thumbs.db
 
 # Project instructions (keep local only)
 CLAUDE.md
+
+# Generated with real secrets substituted
+supabase/schedule.local.sql
+
+# Backup of a pre-existing webhook config
+.old-helius-webhook.json
