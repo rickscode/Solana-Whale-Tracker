@@ -41,7 +41,10 @@ async function buildRow(swap: SwapEvent, wallet: Wallet, raw: unknown): Promise<
             total += swap.quoteNative * nativePrice;
         }
     }
-    if (priced && (hasUsd || hasNative)) {
+    // A negative total means the routing legs outweighed the trade legs, so the
+    // netting did not capture this swap. Leave the value unknown rather than
+    // publish a sell that appears to have lost money on the proceeds.
+    if (priced && (hasUsd || hasNative) && total > 0) {
         usdValue = total;
     }
 

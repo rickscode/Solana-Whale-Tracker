@@ -69,3 +69,5 @@ export const ROBINHOOD_MAX_BLOCK_SPAN = parseInt(process.env.ROBINHOOD_MAX_BLOCK
 export const RPC_MAX_RETRIES = parseInt(process.env.RPC_MAX_RETRIES || '4', 10);
 export const RPC_BACKOFF_MS = parseInt(process.env.RPC_BACKOFF_MS || '600', 10);
 export const RPC_PACE_MS = parseInt(process.env.RPC_PACE_MS || '150', 10);
+/** Below this, a leg is a rounding residue rather than a trade. */
+export const DUST_TOKEN_AMOUNT = 1e-9;

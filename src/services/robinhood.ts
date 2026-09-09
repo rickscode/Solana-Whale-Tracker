@@ -6,6 +6,7 @@ import {
     ROBINHOOD_QUOTES,
     ROBINHOOD_RPC_URL,
     ROBINHOOD_STABLES,
+    DUST_TOKEN_AMOUNT,
     ROBINHOOD_WETH,
     RPC_BACKOFF_MS,
     RPC_MAX_RETRIES,
@@ -147,18 +148,33 @@ export async function getRobinhoodSwaps(address: string, sinceUnix: number): Pro
 
     for (const [txHash, entry] of byTx) {
         const moved = [...entry.deltas.entries()].filter(([, v]) => v !== 0n);
-        const traded = moved.find(([token]) => !ROBINHOOD_QUOTES.has(token));
-        if (!traded) {
+        const candidates = moved.filter(([token]) => !ROBINHOOD_QUOTES.has(token));
+        if (candidates.length === 0) {
             continue; // pure quote movement - a transfer or bridge, not a trade
         }
 
-        const [tokenAddress, tokenDelta] = traded;
+        // Raw integers of tokens with different decimals are not comparable, so
+        // scale first; otherwise a 6-decimal token always loses to an 18-decimal one.
+        let tokenAddress = '';
+        let tokenDelta = 0n;
+        let tokenAmount = 0;
+        for (const [token, delta] of candidates) {
+            const scaled = Math.abs(Number(delta) / 10 ** (await getDecimals(token)));
+            if (scaled > tokenAmount) {
+                tokenAmount = scaled;
+                tokenAddress = token;
+                tokenDelta = delta;
+            }
+        }
+        if (tokenAmount < DUST_TOKEN_AMOUNT) {
+            continue; // a rounding residue, not a trade
+        }
+
         const side: SwapEvent['side'] = tokenDelta > 0n ? 'buy' : 'sell';
 
         const { native: quoteNative, usd: quoteUsd } = await priceFromPoolLeg(txHash, tokenAddress);
         await sleep(RPC_PACE_MS);
 
-        const decimals = await getDecimals(tokenAddress);
         const blockTime = await getBlockTime(entry.block);
         if (blockTime <= sinceUnix) {
             continue;
@@ -171,7 +187,7 @@ export async function getRobinhoodSwaps(address: string, sinceUnix: number): Pro
                 blockTime,
                 side,
                 tokenAddress,
-                tokenAmount: Math.abs(Number(tokenDelta) / 10 ** decimals),
+                tokenAmount,
                 quoteNative,
                 quoteUsd,
                 nativeSymbol: 'ETH',

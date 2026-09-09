@@ -1,5 +1,5 @@
 import { HeliusTransaction, Side, SwapEvent } from '../types';
-import { QUOTE_MINTS, STABLE_MINTS, WRAPPED_SOL } from '../config/constants';
+import { DUST_TOKEN_AMOUNT, QUOTE_MINTS, STABLE_MINTS, WRAPPED_SOL } from '../config/constants';
 
 /**
  * Turn a Helius SWAP into a chain-agnostic SwapEvent, or null if it is not a
@@ -41,6 +41,9 @@ export function parseSolanaSwap(tx: HeliusTransaction, wallet: string): SwapEven
     }
 
     const [tokenMint, tokenDelta] = traded;
+    if (Math.abs(tokenDelta) < DUST_TOKEN_AMOUNT) {
+        return null; // a rounding residue, not a trade
+    }
     const side: Side = tokenDelta > 0 ? 'buy' : 'sell';
 
     const quote = netQuoteLegs(tx, wallet, side);

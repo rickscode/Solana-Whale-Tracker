@@ -62,6 +62,10 @@ npm run dev     # watch mode
 ```
 
 ```bash
+npm test        # parser regression suite
+```
+
+```bash
 npm run build && npm start    # production
 ```
 
@@ -123,6 +127,11 @@ order by net_usd desc;
   cached for 60 seconds.
 - **Native SOL amounts may include a small amount of fees and rent** (well under
   1% on a meaningful trade), since those share the transaction's native transfers.
+- **Some Robinhood trades have no derivable price.** pump.fun routes them through
+  a relayer that pays on the trader's behalf, so when there is no pool leg in the
+  transaction there is nothing to price against. These are recorded with a null
+  value and never alerted - they are mostly airdrops and bridge-ins rather than
+  trades.
 - **A brand new token may have no DexScreener pair yet.** The trade is still
   recorded; name, price and liquidity come through as null and the lookup retries
   on the next poll.
