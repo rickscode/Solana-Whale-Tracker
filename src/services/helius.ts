@@ -1,67 +1,46 @@
-import axios, { AxiosInstance } from 'axios';
-import { HELIUS_API_KEY, HELIUS_API_URL } from '../config/constants';
+import axios from 'axios';
+import { HELIUS_API_KEY, HELIUS_API_URL, TX_FETCH_LIMIT } from '../config/constants';
 import { HeliusTransaction } from '../types';
+import { logger } from '../utils/logger';
 
-class HeliusService {
-    private client: AxiosInstance;
+const client = axios.create({
+    baseURL: HELIUS_API_URL,
+    timeout: 30_000,
+    headers: { 'Content-Type': 'application/json' }
+});
 
-    constructor() {
-        this.client = axios.create({
-            baseURL: HELIUS_API_URL,
-            timeout: 30000,
-            headers: {
-                'Content-Type': 'application/json'
-            }
+export async function getWalletTransactions(
+    address: string,
+    limit: number = TX_FETCH_LIMIT
+): Promise<HeliusTransaction[]> {
+    try {
+        const response = await client.get(`/addresses/${address}/transactions`, {
+            params: { 'api-key': HELIUS_API_KEY, limit }
         });
-    }
-
-    /**
-     * Fetch recent transactions for a wallet address
-     */
-    async getWalletTransactions(address: string, limit: number = 10): Promise<HeliusTransaction[]> {
-        try {
-            const response = await this.client.get(`/addresses/${address}/transactions`, {
-                params: {
-                    'api-key': HELIUS_API_KEY,
-                    limit
-                }
-            });
-
-            return response.data as HeliusTransaction[];
-        } catch (error) {
-            if (axios.isAxiosError(error)) {
-                console.error(`Helius API error for wallet ${address}:`, {
-                    status: error.response?.status,
-                    message: error.response?.data?.error || error.message
-                });
-
-                // Handle rate limiting
-                if (error.response?.status === 429) {
-                    console.warn('Rate limit exceeded. Consider reducing poll frequency or upgrading Helius plan.');
-                }
-            } else {
-                console.error(`Unexpected error fetching transactions for ${address}:`, error);
+        return (response.data ?? []) as HeliusTransaction[];
+    } catch (error) {
+        if (axios.isAxiosError(error)) {
+            if (error.response?.status === 429) {
+                logger.warn('Helius rate limit hit - raise POLL_INTERVAL_MS or track fewer wallets');
             }
-
-            throw error;
+            logger.error(
+                `Helius error for ${address}:`,
+                error.response?.status,
+                error.response?.data?.error ?? error.message
+            );
+        } else {
+            logger.error(`Unexpected Helius error for ${address}:`, error);
         }
-    }
-
-    /**
-     * Test Helius API connection
-     */
-    async testConnection(): Promise<boolean> {
-        try {
-            // Test with a known whale wallet
-            await this.getWalletTransactions('6FNy8RFVYoWUZU4TcsjwYp9dSCxe9GUxELg5qy4oekbS', 1);
-            console.log('Helius API connection successful');
-            return true;
-        } catch (error) {
-            console.error('Helius API connection failed:', error);
-            return false;
-        }
+        throw error;
     }
 }
 
-// Export singleton instance
-export const heliusService = new HeliusService();
+export async function testConnection(probeAddress: string): Promise<boolean> {
+    try {
+        await getWalletTransactions(probeAddress, 1);
+        logger.info('Helius connected');
+        return true;
+    } catch {
+        return false;
+    }
+}

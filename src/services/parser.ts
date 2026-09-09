@@ -1,175 +1,108 @@
-import { HeliusTransaction, ParsedTokenTransfer } from '../types';
-import { WRAPPED_SOL, USDC_MINT, USDT_MINT, HELIUS_API_KEY, HELIUS_API_URL, MAX_TOKEN_AGE_MINUTES } from '../config/constants';
-import axios from 'axios';
-
-// Cache for token creation timestamps
-const tokenAgeCache = new Map<string, number>();
+import { HeliusTokenTransfer, HeliusTransaction, Side, SwapEvent } from '../types';
+import { QUOTE_MINTS, STABLE_MINTS, WRAPPED_SOL } from '../config/constants';
 
 /**
- * Parse a Helius transaction to extract swap information
+ * Turn a Helius SWAP into a chain-agnostic SwapEvent, or null if it is not a
+ * swap this wallet took part in.
+ *
+ * Solana addresses are base58 and case-sensitive, so these compare with ===.
+ * Lowercasing them (an EVM habit) can collapse two distinct addresses into one.
  */
-export async function parseSwapTransaction(
-    tx: HeliusTransaction,
-    walletAddress: string
-): Promise<ParsedTokenTransfer | null> {
-    // Only process SWAP transactions
-    if (tx.type !== 'SWAP') {
+export function parseSolanaSwap(tx: HeliusTransaction, wallet: string): SwapEvent | null {
+    if (tx.type !== 'SWAP' || tx.transactionError) {
         return null;
     }
 
-    // Skip failed transactions
-    if (tx.transactionError) {
-        return null;
-    }
+    // The traded token is the non-quote leg the wallet received (buy) or sent (sell).
+    let traded: HeliusTokenTransfer | null = null;
+    let side: Side | null = null;
 
-    const { tokenTransfers, nativeTransfers } = tx;
-
-    // Find the non-SOL token transfer involving this wallet
-    let tokenTransfer = null;
-    let isBuy = false;
-
-    for (const transfer of tokenTransfers) {
-        // Skip wrapped SOL transfers
-        if (transfer.mint === WRAPPED_SOL) {
+    for (const transfer of tx.tokenTransfers ?? []) {
+        if (QUOTE_MINTS.has(transfer.mint)) {
             continue;
         }
-
-        if (transfer.toUserAccount?.toLowerCase() === walletAddress.toLowerCase()) {
-            // Receiving token = BUY
-            isBuy = true;
-            tokenTransfer = transfer;
+        if (transfer.toUserAccount === wallet) {
+            traded = transfer;
+            side = 'buy';
             break;
-        } else if (transfer.fromUserAccount?.toLowerCase() === walletAddress.toLowerCase()) {
-            // Sending token = SELL
-            isBuy = false;
-            tokenTransfer = transfer;
+        }
+        if (transfer.fromUserAccount === wallet) {
+            traded = transfer;
+            side = 'sell';
             break;
         }
     }
 
-    if (!tokenTransfer) {
+    if (!traded || !side || !traded.tokenAmount) {
         return null;
     }
 
-    // Calculate USD value from the swap
-    const usdValue = calculateUSDValue(tokenTransfers, nativeTransfers, walletAddress, isBuy);
-    const price = usdValue / tokenTransfer.tokenAmount;
+    const quote = netQuoteLegs(tx, wallet, side);
 
-    // Check token age for BUY transactions only
-    let tokenAgeMinutes = null;
-    if (isBuy) {
-        const tokenCreationTime = await getTokenCreationTime(tokenTransfer.mint);
-        if (tokenCreationTime) {
-            tokenAgeMinutes = Math.floor((tx.timestamp - tokenCreationTime) / 60);
-
-            // Filter: Only notify for tokens less than MAX_TOKEN_AGE_MINUTES old
-            if (tokenAgeMinutes > MAX_TOKEN_AGE_MINUTES) {
-                console.log(`Filtering out buy: Token ${tokenTransfer.mint} is ${tokenAgeMinutes} minutes old (> ${MAX_TOKEN_AGE_MINUTES} min threshold)`);
-                return null;
-            }
-        }
-    }
-
-    // Use mint address as identifier
     return {
-        type: isBuy ? 'buy' : 'sell',
-        tokenMint: tokenTransfer.mint,
-        tokenSymbol: tokenTransfer.mint,
-        tokenName: tokenTransfer.mint,
-        amount: tokenTransfer.tokenAmount,
-        priceUsd: price,
-        valueUsd: usdValue,
-        signature: tx.signature,
-        timestamp: tx.timestamp
+        chain: 'solana',
+        txHash: tx.signature,
+        blockTime: tx.timestamp,
+        side,
+        tokenAddress: traded.mint,
+        tokenAmount: traded.tokenAmount,
+        quoteSol: quote.sol,
+        quoteUsd: quote.usd,
+        dex: tx.source || null
     };
 }
 
 /**
- * Calculate USD value of the swap from SOL or stablecoin transfers
+ * What the wallet actually paid (buy) or received (sell).
+ *
+ * A routed swap splits the payment across several legs and often bounces
+ * through the wallet's own wrapped-SOL account, so every leg has to be summed
+ * and the opposite direction subtracted. Taking a single leg reports a
+ * fraction of the trade; ignoring the return legs reports a multiple of it.
+ *
+ * Legs that never touch the wallet belong to the router, not the trader, and
+ * are excluded entirely.
  */
-function calculateUSDValue(
-    tokenTransfers: any[],
-    nativeTransfers: any[],
-    walletAddress: string,
-    isBuy: boolean
-): number {
-    // First, try to find USDC or USDT transfers
-    for (const transfer of tokenTransfers) {
-        if (transfer.mint === USDC_MINT || transfer.mint === USDT_MINT) {
-            // For buy: wallet sends stablecoin
-            // For sell: wallet receives stablecoin
-            if (isBuy && transfer.fromUserAccount?.toLowerCase() === walletAddress.toLowerCase()) {
-                return transfer.tokenAmount;
-            } else if (!isBuy && transfer.toUserAccount?.toLowerCase() === walletAddress.toLowerCase()) {
-                return transfer.tokenAmount;
-            }
+function netQuoteLegs(
+    tx: HeliusTransaction,
+    wallet: string,
+    side: Side
+): { sol: number; usd: number } {
+    // On a buy the quote leaves the wallet; on a sell it arrives.
+    const sign = (from: string, to: string): number => {
+        const out = from === wallet;
+        const inbound = to === wallet;
+        if (out === inbound) {
+            return 0; // untouched by this wallet, or a self-transfer
+        }
+        const spending = side === 'buy';
+        return out === spending ? 1 : -1;
+    };
+
+    let usd = 0;
+    let sol = 0;
+    let sawWrappedSol = false;
+
+    for (const t of tx.tokenTransfers ?? []) {
+        const direction = sign(t.fromUserAccount, t.toUserAccount);
+        if (direction === 0) {
+            continue;
+        }
+        if (STABLE_MINTS.has(t.mint)) {
+            usd += direction * t.tokenAmount;
+        } else if (t.mint === WRAPPED_SOL) {
+            sawWrappedSol = true;
+            sol += direction * t.tokenAmount;
         }
     }
 
-    // If no stablecoin, calculate from SOL transfers
-    // Note: This requires knowing SOL price, which we don't have directly
-    // For MVP, we'll estimate or use wrapped SOL transfers
-    for (const transfer of tokenTransfers) {
-        if (transfer.mint === WRAPPED_SOL) {
-            const solAmount = transfer.tokenAmount;
-            // TODO: Fetch current SOL price from an oracle or price feed
-            // For now, use a placeholder (you'll need to implement price fetching)
-            const estimatedSolPrice = 100; // Placeholder - REPLACE WITH ACTUAL PRICE
-            return solAmount * estimatedSolPrice;
+    // Native lamports only count when nothing was wrapped, otherwise a
+    // wrap-then-swap gets charged twice for the same SOL.
+    if (!sawWrappedSol) {
+        for (const n of tx.nativeTransfers ?? []) {
+            sol += sign(n.fromUserAccount, n.toUserAccount) * (n.amount / 1e9);
         }
     }
 
-    // Fallback to native SOL transfers
-    for (const transfer of nativeTransfers) {
-        if (isBuy && transfer.fromUserAccount?.toLowerCase() === walletAddress.toLowerCase()) {
-            const solAmount = transfer.amount / 1e9; // Convert lamports to SOL
-            const estimatedSolPrice = 100; // Placeholder - REPLACE WITH ACTUAL PRICE
-            return solAmount * estimatedSolPrice;
-        } else if (!isBuy && transfer.toUserAccount?.toLowerCase() === walletAddress.toLowerCase()) {
-            const solAmount = transfer.amount / 1e9; // Convert lamports to SOL
-            const estimatedSolPrice = 100; // Placeholder - REPLACE WITH ACTUAL PRICE
-            return solAmount * estimatedSolPrice;
-        }
-    }
-
-    return 0;
-}
-
-/**
- * Get token creation timestamp from Solana blockchain
- */
-async function getTokenCreationTime(mint: string): Promise<number | null> {
-    // Check cache first
-    if (tokenAgeCache.has(mint)) {
-        return tokenAgeCache.get(mint)!;
-    }
-
-    try {
-        // Use Helius to get the token's first transaction (mint creation)
-        const response = await axios.get(
-            `${HELIUS_API_URL}/addresses/${mint}/transactions`,
-            {
-                params: {
-                    'api-key': HELIUS_API_KEY,
-                    limit: 1,
-                    type: 'any'
-                }
-            }
-        );
-
-        if (response.data && response.data.length > 0) {
-            // The last transaction is the creation (mint initialization)
-            const creationTx = response.data[response.data.length - 1];
-            const creationTime = creationTx.timestamp;
-
-            // Cache the result
-            tokenAgeCache.set(mint, creationTime);
-            return creationTime;
-        }
-    } catch (error) {
-        console.error(`Error fetching token creation time for ${mint}:`, error);
-    }
-
-    // If we can't determine age, allow it through (don't filter)
-    return null;
+    return { sol, usd };
 }

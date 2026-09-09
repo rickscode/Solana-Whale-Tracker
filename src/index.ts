@@ -1,228 +1,190 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import { validateEnvVariables, POLL_INTERVAL_MS } from './config/constants';
-import { WalletsConfig } from './types';
-import { testConnection as testSupabaseConnection } from './database/supabase';
-import { heliusService } from './services/helius';
-import { telegramService } from './services/telegram';
-import { parseSwapTransaction } from './services/parser';
-import { shouldNotifyBuy, shouldNotifySell } from './utils/filters';
 import {
-    isSignatureProcessed,
-    markSignatureProcessed,
-    recordBuyTransaction,
-    recordSellTransaction,
-    getOpenPosition
-} from './database/queries';
+    MIN_ALERT_USD,
+    POLL_INTERVAL_MS,
+    TX_FETCH_LIMIT,
+    validateEnvVariables
+} from './config/constants';
+import { SwapEvent, TradeRow, Wallet } from './types';
+import { testConnection as testSupabase } from './database/supabase';
+import { getActiveWallets, insertTrade } from './database/queries';
+import * as helius from './services/helius';
+import * as telegram from './services/telegram';
+import { getSolPriceUsd, getTokenInfo } from './services/dexscreener';
+import { parseSolanaSwap } from './services/parser';
 import { logger } from './utils/logger';
 
-// Track last processed signature for each wallet to avoid re-processing
-const lastProcessedSignatures = new Map<string, string>();
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
-async function loadWallets(): Promise<WalletsConfig> {
-    const walletsPath = path.join(__dirname, 'config', 'wallets.json');
-    const walletsData = fs.readFileSync(walletsPath, 'utf-8');
-    return JSON.parse(walletsData) as WalletsConfig;
+// A wallet's first pass records its back history without alerting on it.
+const seeded = new Set<string>();
+
+async function buildRow(swap: SwapEvent, wallet: Wallet, raw: unknown): Promise<TradeRow> {
+    const info = await getTokenInfo(swap.chain, swap.tokenAddress);
+
+    // A routed swap can pay partly in stablecoins and partly in SOL, so both
+    // legs count. If a SOL leg can't be priced, the total is unknown rather
+    // than the stablecoin half, which would understate the trade.
+    const hasUsd = swap.quoteUsd !== 0;
+    const hasSol = swap.quoteSol !== 0;
+
+    let usdValue: number | null = null;
+    let total = swap.quoteUsd;
+    let priced = true;
+
+    if (hasSol) {
+        const solPrice = await getSolPriceUsd();
+        if (solPrice === null) {
+            priced = false;
+        } else {
+            total += swap.quoteSol * solPrice;
+        }
+    }
+    if (priced && (hasUsd || hasSol)) {
+        usdValue = total;
+    }
+
+    const quoteSymbol = hasUsd && hasSol ? 'MIXED' : hasSol ? 'SOL' : 'USD';
+    const quoteAmount = quoteSymbol === 'SOL' ? swap.quoteSol : swap.quoteUsd;
+
+    // Their effective fill, derived from what actually moved - not the current
+    // market price, which has already drifted by the time we see the trade.
+    const priceUsd =
+        usdValue !== null && swap.tokenAmount > 0 ? usdValue / swap.tokenAmount : info.priceUsd;
+
+    return {
+        chain: swap.chain,
+        wallet_address: wallet.address,
+        wallet_label: wallet.label,
+        side: swap.side,
+        tx_hash: swap.txHash,
+        token_address: swap.tokenAddress,
+        token_symbol: info.symbol,
+        token_name: info.name,
+        token_amount: swap.tokenAmount,
+        quote_symbol: quoteSymbol,
+        quote_amount: quoteAmount,
+        usd_value: usdValue,
+        price_usd: priceUsd,
+        dex: swap.dex ?? info.dexId,
+        liquidity_usd: info.liquidityUsd,
+        market_cap_usd: info.marketCapUsd,
+        pair_url: info.pairUrl,
+        block_time: new Date(swap.blockTime * 1000).toISOString(),
+        raw
+    };
 }
 
-async function processWallet(walletAddress: string, walletLabel?: string): Promise<void> {
-    try {
-        logger.debug(`Fetching transactions for wallet: ${walletAddress}`);
+async function processWallet(wallet: Wallet): Promise<void> {
+    const transactions = await helius.getWalletTransactions(wallet.address, TX_FETCH_LIMIT);
+    const isSeeding = !seeded.has(wallet.address);
 
-        // Fetch recent transactions
-        const transactions = await heliusService.getWalletTransactions(walletAddress, 10);
-
-        // Get the last processed signature for this wallet
-        const lastProcessed = lastProcessedSignatures.get(walletAddress);
-
-        // Process transactions in chronological order (oldest first)
-        const reversedTxs = [...transactions].reverse();
-
-        for (const tx of reversedTxs) {
-            // Stop when we reach the last processed signature
-            if (lastProcessed && tx.signature === lastProcessed) {
-                break;
-            }
-
-            // Check if already processed in database
-            const processed = await isSignatureProcessed(tx.signature);
-            if (processed) {
-                logger.debug(`Skipping already processed signature: ${tx.signature}`);
+    // Oldest first, so the trade log reads chronologically.
+    for (const tx of [...transactions].reverse()) {
+        try {
+            const swap = parseSolanaSwap(tx, wallet.address);
+            if (!swap) {
                 continue;
             }
 
-            // Parse the transaction
-            const parsed = await parseSwapTransaction(tx, walletAddress);
-            if (!parsed) {
-                // Not a swap or couldn't parse - mark as processed and continue
-                await markSignatureProcessed(tx.signature, walletAddress);
+            const row = await buildRow(swap, wallet, tx);
+
+            // Already have it - the unique constraint decides, not local state.
+            if (!(await insertTrade(row))) {
                 continue;
             }
 
-            logger.info(`Detected ${parsed.type.toUpperCase()}: ${parsed.tokenSymbol} by ${walletLabel || walletAddress.slice(0, 8)}`);
+            const value = row.usd_value !== null ? formatValue(row.usd_value) : 'unknown value';
+            logger.info(
+                `${row.side.toUpperCase()} ${row.token_symbol ?? row.token_address} by ${wallet.label} (${value})`
+            );
 
-            if (parsed.type === 'buy') {
-                // Record buy in database
-                await recordBuyTransaction({
-                    walletAddress,
-                    tokenMint: parsed.tokenMint,
-                    tokenSymbol: parsed.tokenSymbol,
-                    tokenName: parsed.tokenName,
-                    signature: parsed.signature,
-                    timestamp: parsed.timestamp,
-                    priceUsd: parsed.priceUsd,
-                    amount: parsed.amount,
-                    valueUsd: parsed.valueUsd
-                });
-
-                // Check if we should notify
-                if (shouldNotifyBuy(parsed.valueUsd)) {
-                    logger.info(`Sending buy notification: ${parsed.tokenSymbol} - ${parsed.valueUsd.toFixed(2)} USD`);
-                    await telegramService.sendBuyNotification({
-                        walletAddress,
-                        walletLabel,
-                        tokenSymbol: parsed.tokenSymbol,
-                        tokenName: parsed.tokenName,
-                        amount: parsed.amount,
-                        priceUsd: parsed.priceUsd,
-                        valueUsd: parsed.valueUsd,
-                        signature: parsed.signature
-                    });
-                } else {
-                    logger.info(`Buy below threshold, not notifying: ${parsed.valueUsd.toFixed(2)} USD`);
-                }
-            } else {
-                // SELL transaction
-                // Get the open position
-                const position = await getOpenPosition(walletAddress, parsed.tokenMint);
-
-                if (!position) {
-                    logger.warn(`Sell without open position: ${walletAddress} ${parsed.tokenMint}`);
-                    await markSignatureProcessed(tx.signature, walletAddress);
-                    continue;
-                }
-
-                // Record sell
-                await recordSellTransaction({
-                    walletAddress,
-                    tokenMint: parsed.tokenMint,
-                    signature: parsed.signature,
-                    timestamp: parsed.timestamp,
-                    priceUsd: parsed.priceUsd,
-                    amount: parsed.amount,
-                    valueUsd: parsed.valueUsd
-                });
-
-                // Get updated position to calculate P&L
-                const buyTimestamp = new Date(position.buy_timestamp).getTime() / 1000;
-                const holdDurationSeconds = parsed.timestamp - buyTimestamp;
-                const profitLossUsd = parsed.valueUsd - position.buy_value_usd;
-                const profitLossPercent = ((parsed.priceUsd - position.buy_price_usd) / position.buy_price_usd) * 100;
-
-                // Always notify on sells (no filtering)
-                if (shouldNotifySell()) {
-                    logger.info(`Sending sell notification: ${parsed.tokenSymbol} - P&L: ${profitLossPercent.toFixed(2)}%`);
-                    await telegramService.sendSellNotification({
-                        walletAddress,
-                        walletLabel,
-                        tokenSymbol: parsed.tokenSymbol,
-                        tokenName: parsed.tokenName,
-                        amount: parsed.amount,
-                        buyPriceUsd: position.buy_price_usd,
-                        sellPriceUsd: parsed.priceUsd,
-                        buyValueUsd: position.buy_value_usd,
-                        sellValueUsd: parsed.valueUsd,
-                        profitLossUsd,
-                        profitLossPercent,
-                        holdDurationSeconds,
-                        signature: parsed.signature
-                    });
-                }
+            if (isSeeding) {
+                continue;
             }
-
-            // Mark as processed
-            await markSignatureProcessed(tx.signature, walletAddress);
+            if (row.usd_value !== null && row.usd_value < MIN_ALERT_USD) {
+                continue;
+            }
+            await telegram.sendTradeAlert(row);
+        } catch (error) {
+            // One bad transaction must never stop the cycle or block later ones.
+            logger.error(`Failed on ${tx.signature}:`, error instanceof Error ? error.message : error);
         }
+    }
 
-        // Update last processed signature for this wallet
-        if (transactions.length > 0) {
-            lastProcessedSignatures.set(walletAddress, transactions[0].signature);
-        }
-    } catch (error) {
-        logger.error(`Error processing wallet ${walletAddress}:`, error);
-        // Don't throw - continue with next wallet
+    if (isSeeding) {
+        seeded.add(wallet.address);
+        logger.info(`Seeded history for ${wallet.label} - alerts start from the next cycle`);
     }
 }
 
-async function monitoringLoop(wallets: WalletsConfig): Promise<void> {
-    while (true) {
-        logger.debug('Starting monitoring cycle...');
+function formatValue(usd: number): string {
+    return `$${usd.toFixed(2)}`;
+}
 
-        for (const wallet of wallets.wallets) {
-            await processWallet(wallet.address, wallet.label);
+async function monitoringLoop(): Promise<void> {
+    for (;;) {
+        try {
+            // Re-read every cycle, so adding a wallet needs no restart.
+            const wallets = await getActiveWallets();
+            if (wallets.length === 0) {
+                logger.warn('No active wallets - add a row to the wallets table');
+            }
 
-            // Small delay between wallets to avoid rate limiting
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            for (const wallet of wallets) {
+                try {
+                    await processWallet(wallet);
+                } catch (error) {
+                    logger.error(
+                        `Wallet ${wallet.label} failed this cycle:`,
+                        error instanceof Error ? error.message : error
+                    );
+                }
+                await sleep(1000);
+            }
+        } catch (error) {
+            logger.error('Cycle failed:', error instanceof Error ? error.message : error);
         }
 
-        logger.debug(`Monitoring cycle complete. Waiting ${POLL_INTERVAL_MS}ms...`);
-        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+        await sleep(POLL_INTERVAL_MS);
     }
 }
 
 async function main(): Promise<void> {
-    try {
-        logger.info('Starting Solana Whale Tracker...');
+    logger.info('Starting whale tracker...');
+    validateEnvVariables();
 
-        // Validate environment variables
-        validateEnvVariables();
-
-        // Test connections
-        logger.info('Testing Supabase connection...');
-        const supabaseOk = await testSupabaseConnection();
-        if (!supabaseOk) {
-            throw new Error('Supabase connection failed');
-        }
-
-        logger.info('Testing Helius API connection...');
-        const heliusOk = await heliusService.testConnection();
-        if (!heliusOk) {
-            throw new Error('Helius API connection failed');
-        }
-
-        logger.info('Testing Telegram bot connection...');
-        const telegramOk = await telegramService.testConnection();
-        if (!telegramOk) {
-            throw new Error('Telegram bot connection failed');
-        }
-
-        // Load wallets
-        const wallets = await loadWallets();
-        logger.info(`Loaded ${wallets.wallets.length} wallet(s) to monitor`);
-
-        for (const wallet of wallets.wallets) {
-            logger.info(`  - ${wallet.label || wallet.address}`);
-        }
-
-        // Start monitoring
-        logger.info('Starting monitoring loop...');
-        await monitoringLoop(wallets);
-    } catch (error) {
-        logger.error('Fatal error:', error);
-        process.exit(1);
+    if (!(await testSupabase())) {
+        throw new Error('Supabase connection failed');
     }
+
+    const wallets = await getActiveWallets();
+    if (wallets.length === 0) {
+        throw new Error('No active wallets - run schema.sql, or add a row to the wallets table');
+    }
+    logger.info(`Loaded ${wallets.length} wallet(s): ${wallets.map(w => w.label).join(', ')}`);
+
+    if (!(await helius.testConnection(wallets[0].address))) {
+        throw new Error('Helius connection failed');
+    }
+    if (!(await telegram.testConnection())) {
+        throw new Error('Telegram connection failed');
+    }
+
+    logger.info(`Polling every ${POLL_INTERVAL_MS}ms`);
+    await monitoringLoop();
 }
 
-// Handle graceful shutdown
-process.on('SIGTERM', () => {
-    logger.info('Received SIGTERM, shutting down gracefully...');
-    process.exit(0);
-});
-
 process.on('SIGINT', () => {
-    logger.info('Received SIGINT, shutting down gracefully...');
+    logger.info('Shutting down');
     process.exit(0);
 });
 
-// Start the application
-main();
+process.on('SIGTERM', () => {
+    logger.info('Shutting down');
+    process.exit(0);
+});
+
+main().catch(error => {
+    logger.error('Fatal:', error instanceof Error ? error.message : error);
+    process.exit(1);
+});

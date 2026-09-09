@@ -1,34 +1,36 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import * as dotenv from 'dotenv';
+import { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } from '../config/constants';
+import { logger } from '../utils/logger';
 
-dotenv.config();
+let client: SupabaseClient | null = null;
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
-    throw new Error('Missing Supabase credentials. Please check SUPABASE_URL and SUPABASE_ANON_KEY in .env file');
+/** Created on first use, so missing credentials surface as a normal error and not an import crash. */
+export function getSupabase(): SupabaseClient {
+    if (!client) {
+        if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+            throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+        }
+        client = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+            auth: { persistSession: false, autoRefreshToken: false }
+        });
+    }
+    return client;
 }
 
-// Create Supabase client
-export const supabase: SupabaseClient = createClient(supabaseUrl, supabaseKey, {
-    auth: {
-        persistSession: false
-    }
-});
-
-// Test connection function
 export async function testConnection(): Promise<boolean> {
     try {
-        const { error } = await supabase.from('positions').select('count', { count: 'exact', head: true });
+        const { error } = await getSupabase()
+            .from('wallets')
+            .select('id', { count: 'exact', head: true });
+
         if (error) {
-            console.error('Supabase connection test failed:', error.message);
+            logger.error('Supabase connection failed:', error.message);
             return false;
         }
-        console.log('Supabase connection successful');
+        logger.info('Supabase connected');
         return true;
     } catch (error) {
-        console.error('Supabase connection error:', error);
+        logger.error('Supabase connection error:', error instanceof Error ? error.message : error);
         return false;
     }
 }

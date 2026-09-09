@@ -1,107 +1,77 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID } from '../config/constants';
-import { BuyNotificationData, SellNotificationData } from '../types';
-import { formatHoldDuration, formatUSD, formatPercent } from '../utils/filters';
+import { TradeRow } from '../types';
+import { escapeHtml, formatAmount, formatPrice, formatUsd, truncate } from '../utils/format';
+import { logger } from '../utils/logger';
 
-class TelegramService {
-    private bot: TelegramBot;
-    private chatId: string;
+let bot: TelegramBot | null = null;
 
-    constructor() {
-        this.bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
-        this.chatId = TELEGRAM_CHAT_ID;
+function getBot(): TelegramBot {
+    if (!bot) {
+        bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
     }
-
-    /**
-     * Send a buy notification
-     */
-    async sendBuyNotification(data: BuyNotificationData): Promise<void> {
-        const walletDisplay = data.walletLabel || this.truncateAddress(data.walletAddress);
-
-        const message = `
-<b>BUY ALERT</b>
-
-<b>Wallet:</b> ${walletDisplay}
-<code>${data.walletAddress}</code>
-
-<b>Token:</b> ${data.tokenSymbol}
-${data.tokenName !== data.tokenSymbol ? `<i>${data.tokenName}</i>` : ''}
-
-<b>Amount:</b> ${data.amount.toLocaleString()}
-<b>Price:</b> $${data.priceUsd.toFixed(6)}
-<b>Value:</b> ${formatUSD(data.valueUsd)}
-
-<a href="https://solscan.io/tx/${data.signature}">View Transaction</a>
-        `.trim();
-
-        try {
-            await this.bot.sendMessage(this.chatId, message, { parse_mode: 'HTML' });
-        } catch (error) {
-            console.error('Error sending buy notification:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Send a sell notification
-     */
-    async sendSellNotification(data: SellNotificationData): Promise<void> {
-        const walletDisplay = data.walletLabel || this.truncateAddress(data.walletAddress);
-        const profitEmoji = data.profitLossPercent >= 0 ? '' : '';
-        const holdDuration = formatHoldDuration(data.holdDurationSeconds);
-
-        const message = `
-${profitEmoji} <b>SELL ALERT</b>
-
-<b>Wallet:</b> ${walletDisplay}
-<code>${data.walletAddress}</code>
-
-<b>Token:</b> ${data.tokenSymbol}
-${data.tokenName !== data.tokenSymbol ? `<i>${data.tokenName}</i>` : ''}
-
-<b>Amount:</b> ${data.amount.toLocaleString()}
-
-<b>Buy Price:</b> $${data.buyPriceUsd.toFixed(6)}
-<b>Sell Price:</b> $${data.sellPriceUsd.toFixed(6)}
-
-<b>Buy Value:</b> ${formatUSD(data.buyValueUsd)}
-<b>Sell Value:</b> ${formatUSD(data.sellValueUsd)}
-
-<b>P&L:</b> ${formatUSD(data.profitLossUsd)} (${formatPercent(data.profitLossPercent)})
-<b>Hold Time:</b> ${holdDuration}
-
-<a href="https://solscan.io/tx/${data.signature}">View Transaction</a>
-        `.trim();
-
-        try {
-            await this.bot.sendMessage(this.chatId, message, { parse_mode: 'HTML' });
-        } catch (error) {
-            console.error('Error sending sell notification:', error);
-            throw error;
-        }
-    }
-
-    /**
-     * Test Telegram bot connection
-     */
-    async testConnection(): Promise<boolean> {
-        try {
-            const me = await this.bot.getMe();
-            console.log(`Telegram bot connected: @${me.username}`);
-            return true;
-        } catch (error) {
-            console.error('Telegram bot connection failed:', error);
-            return false;
-        }
-    }
-
-    /**
-     * Truncate wallet address for display
-     */
-    private truncateAddress(address: string): string {
-        return `${address.slice(0, 4)}...${address.slice(-4)}`;
-    }
+    return bot;
 }
 
-// Export singleton instance
-export const telegramService = new TelegramService();
+function explorerUrl(chain: string, txHash: string): string | null {
+    return chain === 'solana' ? `https://solscan.io/tx/${txHash}` : null;
+}
+
+export async function sendTradeAlert(trade: TradeRow): Promise<void> {
+    const symbol = escapeHtml(trade.token_symbol || truncate(trade.token_address));
+    const name = trade.token_name ? escapeHtml(trade.token_name) : null;
+
+    // For a SOL-denominated trade the SOL amount is the useful number and the
+    // dollar figure is context; otherwise the dollar figure is the whole story.
+    const quote =
+        trade.quote_symbol === 'SOL'
+            ? `${formatAmount(trade.quote_amount)} SOL`
+            : formatUsd(trade.usd_value);
+    const usd =
+        trade.quote_symbol === 'SOL' && trade.usd_value !== null
+            ? ` (${formatUsd(trade.usd_value)})`
+            : '';
+
+    const lines = [
+        `<b>${trade.side.toUpperCase()}</b> - ${escapeHtml(trade.wallet_label)}`,
+        '',
+        `<b>Token:</b> ${symbol}${name && name !== symbol ? ` (${name})` : ''}`,
+        `<code>${trade.token_address}</code>`,
+        '',
+        `<b>Amount:</b> ${formatAmount(trade.token_amount)}`,
+        `<b>${trade.side === 'buy' ? 'Paid' : 'Received'}:</b> ${quote}${usd}`,
+        `<b>Price:</b> ${formatPrice(trade.price_usd)}`,
+        '',
+        `<b>Market:</b> ${escapeHtml(trade.dex || 'unknown')}`,
+        `<b>Liquidity:</b> ${formatUsd(trade.liquidity_usd)}`,
+        `<b>Market cap:</b> ${formatUsd(trade.market_cap_usd)}`
+    ];
+
+    const links = [
+        { label: 'Explorer', url: explorerUrl(trade.chain, trade.tx_hash) },
+        { label: 'DexScreener', url: trade.pair_url }
+    ]
+        .filter((link): link is { label: string; url: string } => Boolean(link.url))
+        .map(link => `<a href="${link.url}">${link.label}</a>`)
+        .join(' | ');
+
+    if (links) {
+        lines.push('', links);
+    }
+
+    await getBot().sendMessage(TELEGRAM_CHAT_ID, lines.join('\n'), {
+        parse_mode: 'HTML',
+        disable_web_page_preview: true
+    });
+}
+
+export async function testConnection(): Promise<boolean> {
+    try {
+        const me = await getBot().getMe();
+        logger.info(`Telegram connected: @${me.username}`);
+        return true;
+    } catch (error) {
+        logger.error('Telegram connection failed:', error instanceof Error ? error.message : error);
+        return false;
+    }
+}

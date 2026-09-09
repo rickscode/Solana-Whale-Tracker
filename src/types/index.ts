@@ -1,130 +1,86 @@
-// Database types
-export interface Position {
-    id: string;
-    wallet_address: string;
-    token_mint: string;
-    token_symbol: string | null;
-    token_name: string | null;
-    buy_signature: string;
-    buy_timestamp: string;
-    buy_price_usd: number;
-    buy_amount: number;
-    buy_value_usd: number;
-    sell_signature: string | null;
-    sell_timestamp: string | null;
-    sell_price_usd: number | null;
-    sell_amount: number | null;
-    sell_value_usd: number | null;
-    hold_duration_seconds: number | null;
-    profit_loss_usd: number | null;
-    profit_loss_percent: number | null;
-    is_open: boolean;
-    created_at: string;
-    updated_at: string;
+export type Chain = 'solana' | 'robinhood';
+export type Side = 'buy' | 'sell';
+
+export interface Wallet {
+    chain: Chain;
+    address: string;
+    label: string;
 }
 
-// Helius API types
+// --- Helius (Solana) ---
+
 export interface HeliusTokenTransfer {
     fromUserAccount: string;
     toUserAccount: string;
     mint: string;
     tokenAmount: number;
-    tokenStandard: string;
 }
 
 export interface HeliusNativeTransfer {
     fromUserAccount: string;
     toUserAccount: string;
-    amount: number;
+    amount: number; // lamports
 }
 
 export interface HeliusTransaction {
-    description: string;
     type: string;
-    source: string;
-    fee: number;
-    feePayer: string;
+    source: string; // RAYDIUM | JUPITER | PUMP_FUN | ...
     signature: string;
-    slot: number;
-    timestamp: number;
+    timestamp: number; // unix seconds
     tokenTransfers: HeliusTokenTransfer[];
     nativeTransfers: HeliusNativeTransfer[];
-    accountData: any[];
-    transactionError: any | null;
-    instructions: any[];
-    events: any;
+    transactionError: unknown | null;
 }
 
-// Parsed transaction types
-export interface ParsedTokenTransfer {
-    type: 'buy' | 'sell';
-    tokenMint: string;
-    tokenSymbol: string;
-    tokenName: string;
-    amount: number;
-    priceUsd: number;
-    valueUsd: number;
-    signature: string;
-    timestamp: number;
+// --- Chain-agnostic ---
+
+/**
+ * What every chain adapter emits. Adding a chain means producing this shape;
+ * nothing downstream of the parser needs to know which chain it came from.
+ */
+export interface SwapEvent {
+    chain: Chain;
+    txHash: string;
+    blockTime: number; // unix seconds
+    side: Side;
+    tokenAddress: string;
+    tokenAmount: number;
+    /** Net SOL paid (buy) or received (sell), after cancelling routing hops. */
+    quoteSol: number;
+    /** Net stablecoin paid or received, already in USD. */
+    quoteUsd: number;
+    dex: string | null;
 }
 
-// Database operation types
-export interface BuyTransactionData {
-    walletAddress: string;
-    tokenMint: string;
-    tokenSymbol: string;
-    tokenName: string;
-    signature: string;
-    timestamp: number;
-    priceUsd: number;
-    amount: number;
-    valueUsd: number;
+export interface TokenInfo {
+    symbol: string | null;
+    name: string | null;
+    priceUsd: number | null;
+    liquidityUsd: number | null;
+    marketCapUsd: number | null;
+    dexId: string | null;
+    pairUrl: string | null;
 }
 
-export interface SellTransactionData {
-    walletAddress: string;
-    tokenMint: string;
-    signature: string;
-    timestamp: number;
-    priceUsd: number;
-    amount: number;
-    valueUsd: number;
-}
-
-// Telegram notification types
-export interface BuyNotificationData {
-    walletAddress: string;
-    walletLabel?: string;
-    tokenSymbol: string;
-    tokenName: string;
-    amount: number;
-    priceUsd: number;
-    valueUsd: number;
-    signature: string;
-}
-
-export interface SellNotificationData {
-    walletAddress: string;
-    walletLabel?: string;
-    tokenSymbol: string;
-    tokenName: string;
-    amount: number;
-    buyPriceUsd: number;
-    sellPriceUsd: number;
-    buyValueUsd: number;
-    sellValueUsd: number;
-    profitLossUsd: number;
-    profitLossPercent: number;
-    holdDurationSeconds: number;
-    signature: string;
-}
-
-// Configuration types
-export interface WalletConfig {
-    address: string;
-    label?: string;
-}
-
-export interface WalletsConfig {
-    wallets: WalletConfig[];
+/** A row in whale_trades. Column names match the SQL exactly. */
+export interface TradeRow {
+    chain: Chain;
+    wallet_address: string;
+    wallet_label: string;
+    side: Side;
+    tx_hash: string;
+    token_address: string;
+    token_symbol: string | null;
+    token_name: string | null;
+    token_amount: number;
+    quote_symbol: string;
+    quote_amount: number;
+    usd_value: number | null;
+    price_usd: number | null;
+    dex: string | null;
+    liquidity_usd: number | null;
+    market_cap_usd: number | null;
+    pair_url: string | null;
+    block_time: string; // ISO
+    raw: unknown;
 }
