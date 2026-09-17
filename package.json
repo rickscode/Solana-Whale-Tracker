@@ -11,7 +11,8 @@
     "test": "tsx test/parser.test.ts",
     "sync:functions": "node scripts/sync-functions.mjs",
     "webhook:sync": "node scripts/sync-webhook.mjs",
-    "flows": "node scripts/flows.mjs"
+    "flows": "node scripts/flows.mjs",
+    "test:functions": "TELEGRAM_BOT_TOKEN=test TELEGRAM_CHAT_ID=1 deno run --allow-read --allow-env test/telegram-retry.test.ts"
   },
   "keywords": [
     "solana",

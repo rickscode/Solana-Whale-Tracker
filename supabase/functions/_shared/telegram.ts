@@ -27,6 +27,75 @@ function explorerUrl(chain: string, txHash: string): string | null {
     return null;
 }
 
+
+const MAX_ATTEMPTS = 4;
+/** Longest we will wait on Telegram's retry_after, so one alert cannot outlast the sweep. */
+const MAX_WAIT_MS = 10_000;
+
+const realSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Deliver a message, retrying what a retry can actually fix.
+ *
+ * This matters more than it looks: the trade row is written before the alert
+ * is sent, so if the send fails, every later sweep sees the row as a duplicate
+ * and never tries again. A momentary Telegram hiccup would otherwise lose the
+ * alert permanently, with the database looking perfectly correct.
+ *
+ * Retried: network errors and timeouts, 429 (waiting as long as Telegram asks),
+ * and 5xx. Not retried: any other 4xx, which means the message itself is wrong
+ * and will fail identically every time.
+ *
+ * `sleep` is injectable so the retry behaviour can be tested without waiting.
+ */
+export async function postToTelegram(body: string, sleep = realSleep): Promise<void> {
+    let lastError = '';
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        const backoff = Math.min(MAX_WAIT_MS, 1000 * 2 ** (attempt - 1));
+        let res: Response;
+
+        try {
+            res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body,
+                signal: AbortSignal.timeout(15_000)
+            });
+        } catch (error) {
+            lastError = error instanceof Error ? error.message : String(error);
+            if (attempt < MAX_ATTEMPTS) await sleep(backoff);
+            continue;
+        }
+
+        if (res.ok) return;
+
+        const text = await res.text();
+        lastError = `${res.status} ${text}`;
+
+        if (res.status === 429) {
+            let retryAfterMs = backoff;
+            try {
+                const seconds = JSON.parse(text)?.parameters?.retry_after;
+                if (typeof seconds === 'number') retryAfterMs = Math.min(MAX_WAIT_MS, seconds * 1000);
+            } catch {
+                // unparseable body: fall back to exponential backoff
+            }
+            if (attempt < MAX_ATTEMPTS) await sleep(retryAfterMs);
+            continue;
+        }
+
+        if (res.status >= 500) {
+            if (attempt < MAX_ATTEMPTS) await sleep(backoff);
+            continue;
+        }
+
+        throw new Error(`Telegram rejected the message: ${lastError}`);
+    }
+
+    throw new Error(`Telegram send failed after ${MAX_ATTEMPTS} attempts: ${lastError}`);
+}
+
 export async function sendTradeAlert(trade: TradeRow): Promise<void> {
     const symbol = escapeHtml(trade.token_symbol || truncate(trade.token_address));
     const name = trade.token_name ? escapeHtml(trade.token_name) : null;
@@ -62,17 +131,10 @@ export async function sendTradeAlert(trade: TradeRow): Promise<void> {
         .join(' | ');
     if (links) lines.push('', links);
 
-    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            chat_id: TELEGRAM_CHAT_ID,
-            text: lines.join('\n'),
-            parse_mode: 'HTML',
-            disable_web_page_preview: true
-        })
-    });
-    if (!res.ok) {
-        throw new Error(`Telegram send failed: ${res.status} ${await res.text()}`);
-    }
+    await postToTelegram(JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: lines.join('\n'),
+        parse_mode: 'HTML',
+        disable_web_page_preview: true
+    }));
 }
