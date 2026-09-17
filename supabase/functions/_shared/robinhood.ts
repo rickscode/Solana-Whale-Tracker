@@ -116,6 +116,12 @@ async function priceFromPoolLeg(txHash: string, tradedToken: string): Promise<{ 
         else if (token === ROBINHOOD_WETH) native = Math.max(native, amount);
     }
 
+    // A route that settles in a stablecoin carries its whole value in that leg.
+    // A WETH leg alongside it is the same money one hop earlier, not extra -
+    // adding the two recorded a $13,091 sale as $20,469.
+    if (usd > 0) {
+        return { native: 0, usd };
+    }
     return { native, usd };
 }
 
