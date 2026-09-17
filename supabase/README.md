@@ -5,7 +5,13 @@ Two functions replace the local poller:
 - **`whale-webhook`** - Helius pushes Solana transactions here as they happen.
   Alerts land a second or two after the trade.
 - **`whale-sweep`** - runs every 5 minutes. Polls Robinhood Chain, which has no
-  webhook provider, and reconciles Solana in case a webhook push was dropped.
+  webhook provider, through a free public RPC.
+
+Solana is not swept. Reconciling it went through Helius's Enhanced Transactions
+API at **100 credits per call**; eight wallets hourly is ~576,000 credits a month
+against a free allowance of 100,000, and every 5 minutes it exhausted the account.
+Solana relies on the webhook alone at 1 credit per push, so a dropped push is a
+missed trade rather than a late one.
 
 Both share `_shared/`, and `_shared/parser.ts` is generated from
 `src/services/parser.ts` so the two runtimes cannot drift. Regenerate with
@@ -13,11 +19,10 @@ Both share `_shared/`, and `_shared/parser.ts` is generated from
 
 ## Why this shape
 
-Polling from an edge function does not fit the free tier: 14 wallets parsing a
-page of transactions each is roughly 250ms of CPU, and at 5-minute polling that
-is ~2,160 CPU-seconds a month against a 500 limit. Pushing instead means the
-function only runs when a whale actually trades - a few hundred invocations a
-month, well inside the allowance.
+Polling does not fit any free tier here. On Supabase it is CPU: 14 wallets
+parsing a page of transactions each is ~250ms, ~2,160 CPU-seconds a month against
+a 500 limit. On Helius it is credits: parsed transaction history is 100 credits a
+call. Pushing instead means work happens only when a whale actually trades.
 
 ## Deploy
 

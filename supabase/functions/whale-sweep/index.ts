@@ -1,14 +1,15 @@
-// Cron-driven sweep, doing two jobs.
+// Cron-driven sweep for Robinhood Chain.
 //
-// Robinhood Chain has no webhook provider, so it is polled here.
+// Robinhood Chain has no webhook provider, so it is polled here, through a free
+// public RPC that costs nothing per call.
 //
-// Solana is reconciled rather than polled: webhook delivery is not guaranteed,
-// and a dropped push would otherwise be a permanently missed trade. Anything
-// the webhook already stored is a duplicate here and alerts nobody twice, so
-// this costs nothing when everything is working.
+// Solana is deliberately not swept. It used to be reconciled here against
+// dropped webhook pushes, but that went through Helius's Enhanced Transactions
+// API at 100 credits a call - eight wallets hourly is ~576,000 credits a month
+// against a free allowance of 100,000, and at 5-minute intervals it exhausted
+// the account outright. Solana now relies on the webhook alone, at 1 credit per
+// push. A dropped push means a missed trade rather than a late one.
 import { getActiveWallets, getLatestTradeTime } from '../_shared/db.ts';
-import { getRecentSwaps } from '../_shared/helius.ts';
-import { parseSolanaSwaps } from '../_shared/parser.ts';
 import { getRobinhoodSwaps } from '../_shared/robinhood.ts';
 import { recordAndAlert } from '../_shared/trade.ts';
 import type { Wallet } from '../_shared/types.ts';
@@ -24,10 +25,7 @@ async function sweepWallet(wallet: Wallet, tally: Record<string, number>): Promi
     const silent = latest === null;
     const since = latest ?? Math.floor(Date.now() / 1000) - SEED_LOOKBACK_HOURS * 3600;
 
-    const detected = wallet.chain === 'robinhood'
-        ? await getRobinhoodSwaps(wallet.address, since - 60)
-        : (await getRecentSwaps(wallet.address, since - 60))
-            .flatMap(tx => parseSolanaSwaps(tx, wallet.address).map(swap => ({ swap, raw: tx })));
+    const detected = await getRobinhoodSwaps(wallet.address, since - 60);
 
     for (const { swap, raw } of [...detected].reverse()) {
         try {
@@ -44,13 +42,13 @@ Deno.serve(async () => {
         alerted: 0, 'below-threshold': 0, unpriced: 0, duplicate: 0, silent: 0, errors: 0
     };
 
-    const wallets = await getActiveWallets();
+    const wallets = await getActiveWallets('robinhood');
     for (const wallet of wallets) {
         try {
             await sweepWallet(wallet, tally);
         } catch (error) {
             tally.errors++;
-            console.error(`${wallet.chain}/${wallet.label} failed:`, error instanceof Error ? error.message : error);
+            console.error(`${wallet.label} failed:`, error instanceof Error ? error.message : error);
         }
     }
 
